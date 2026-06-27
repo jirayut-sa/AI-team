@@ -1,0 +1,117 @@
+name: AI Dream Team Automator
+
+# ทำงานทุกครั้งที่มี Issue ใหม่ถูกเปิดขึ้น
+on:
+  issues:
+    types: [opened]
+
+# อนุญาตให้ Actions เขียนคอมเมนต์และอ่านเนื้อหาได้
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  ai_process:
+    runs-on: ubuntu-latest
+    
+    # เงื่อนไข: ทำงานเฉพาะเมื่อ Issue มี Label คำว่า 'automated' หรือ 'ai-task'
+    if: contains(github.event.issue.labels.*.name, 'automated') || contains(github.event.issue.labels.*.name, 'ai-task')
+    
+    steps:
+      # 1. แจ้งเตือนว่ากำลังเริ่มทำงาน
+      - name: 💬 แจ้งสถานะ (Acknowledge)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🤖 **AI Dream Team ได้รับงานแล้ว!** \nกำลังวิเคราะห์คำสั่งและประมวลผล (อาจใช้เวลา 1-3 นาที กรุณารอสักครู่)... ⏳'
+            })
+
+      # 2. ติดตั้ง Python เพื่อใช้อ่านข้อมูลและเรียก API
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 📦 Install Requirements
+        run: pip install requests
+
+      # 3. สคริปต์หลัก: อ่าน Issue -> ส่งให้ AI -> เซฟผลลัพธ์
+      - name: 🧠 ประมวลผลผ่าน AI API
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        run: |
+          python -c '
+          import os, json, re, requests, sys
+
+          issue_body = os.environ.get("ISSUE_BODY", "")
+          api_key = os.environ.get("AI_API_KEY", "")
+
+          if not api_key:
+              print("Error: ไม่พบ AI_API_KEY ใน GitHub Secrets")
+              sys.exit(1)
+
+          # ก. ดึงชื่อ Model ออกมาจาก Payload ที่ซ่อนไว้ (<!-- AI_OFFICE_HUB_PAYLOAD ... -->)
+          payload_match = re.search(r"<!-- AI_OFFICE_HUB_PAYLOAD(.*?)-->", issue_body, re.DOTALL)
+          target_model = "gpt-4o-mini" # รุ่นเริ่มต้นหากหาไม่เจอ
+          
+          if payload_match:
+              try:
+                  payload = json.loads(payload_match.group(1).strip())
+                  target_model = payload.get("lead_model", target_model)
+              except:
+                  pass
+
+          # ข. ลบส่วน Payload ออกจากข้อความ เพื่อไม่ให้ส่งโค้ดขยะไปรบกวน AI
+          clean_prompt = re.sub(r"<!-- AI_OFFICE_HUB_PAYLOAD.*?-->", "", issue_body, flags=re.DOTALL).strip()
+
+          # ค. ตั้งค่า API Endpoint (ตัวอย่างนี้ใช้ Endpoint แบบเดียวกับ OpenAI / GitHub Models)
+          # หากคุณใช้ OpenAI เปลี่ยนเป็น: [https://api.openai.com/v1/chat/completions](https://api.openai.com/v1/chat/completions)
+          api_url = "[https://models.inference.ai.azure.com/chat/completions](https://models.inference.ai.azure.com/chat/completions)" # สำหรับ GitHub Models
+          
+          headers = {
+              "Authorization": f"Bearer {api_key}",
+              "Content-Type": "application/json"
+          }
+          
+          data = {
+              "model": target_model,
+              "messages": [
+                  {"role": "user", "content": clean_prompt}
+              ],
+              "temperature": 0.7
+          }
+
+          # ง. ยิง API และดึงผลลัพธ์
+          print(f"กำลังส่งคำสั่งไปที่ Model: {target_model}...")
+          try:
+              response = requests.post(api_url, headers=headers, json=data)
+              response.raise_for_status()
+              result = response.json()["choices"][0]["message"]["content"]
+          except Exception as e:
+              result = f"❌ **เกิดข้อผิดพลาดในการเรียก AI API:** {str(e)}\n\nResponse: {response.text if hasattr(response, \'text\') else \'N/A\'}"
+
+          # จ. บันทึกผลลัพธ์ลงไฟล์ เพื่อส่งให้ Step ต่อไป
+          with open("ai_result.md", "w", encoding="utf-8") as f:
+              f.write(result)
+          '
+
+      # 4. คอมเมนต์ผลลัพธ์ลงใน Issue
+      - name: 📤 ส่งมอบงานกลับไปยัง Issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            // อ่านไฟล์ที่ Python บันทึกไว้
+            const result = fs.readFileSync('ai_result.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ **งานเสร็จสมบูรณ์! นี่คือผลลัพธ์จาก AI:**\n\n---\n\n' + result
+            })
